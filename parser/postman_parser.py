@@ -6,18 +6,32 @@ Each dict contains: name, method, url, headers, body, auth, folder_path.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 
-def _resolve_url(url_field: Any) -> str:
+def _substitute_vars(text: str, variables: dict[str, str]) -> str:
+    """Replace {{var_name}} placeholders with values from the variables dict."""
+    if not variables or not text:
+        return text
+
+    def replacer(match: re.Match) -> str:
+        key = match.group(1).strip()
+        return variables.get(key, match.group(0))  # leave unresolved vars as-is
+
+    return re.sub(r"\{\{([^}]+)\}\}", replacer, text)
+
+
+def _resolve_url(url_field: Any, variables: dict[str, str] | None = None) -> str:
     """Return a plain URL string from Postman's url field (string or object)."""
+    vars_ = variables or {}
     if isinstance(url_field, str):
-        return url_field
+        return _substitute_vars(url_field, vars_)
     if isinstance(url_field, dict):
         raw = url_field.get("raw", "")
         if raw:
-            return raw
+            return _substitute_vars(raw, vars_)
         # Reconstruct from parts
         protocol = url_field.get("protocol", "http")
         host = ".".join(url_field.get("host", []))
@@ -108,6 +122,7 @@ def _walk_items(
     items: list[dict],
     folder_path: str,
     collection_auth: dict | None,
+    variables: dict[str, str] | None = None,
 ) -> list[dict]:
     """
     Recursively walk Postman items.
@@ -120,7 +135,7 @@ def _walk_items(
             # This is a folder — recurse
             folder_name = item.get("name", "")
             child_path = f"{folder_path}/{folder_name}" if folder_path else folder_name
-            children = _walk_items(item["item"], child_path, collection_auth)
+            children = _walk_items(item["item"], child_path, collection_auth, variables)
             endpoints.extend(children)
         else:
             # This is a request
@@ -129,7 +144,7 @@ def _walk_items(
                 continue
 
             method = request.get("method", "GET").upper()
-            url = _resolve_url(request.get("url", ""))
+            url = _resolve_url(request.get("url", ""), variables)
             headers = _parse_headers(request.get("header", []))
             body_str = _parse_body(request.get("body"))
             auth = _extract_auth(request.get("auth") or collection_auth)
@@ -153,9 +168,21 @@ def _walk_items(
     return endpoints
 
 
-def parse_collection(file_path: str | Path) -> list[dict]:
+def parse_collection(
+    file_path: str | Path,
+    variables: dict[str, str] | None = None,
+) -> list[dict]:
     """
     Parse a Postman Collection v2.0 / v2.1 JSON file.
+
+    Parameters
+    ----------
+    file_path : str | Path
+        Path to the Postman Collection JSON file.
+    variables : dict[str, str] | None
+        Optional mapping of Postman variable names to values.
+        Substitutes ``{{var_name}}`` placeholders in URLs and bodies.
+        Example: {"local_url": "https://qa.xcelviewpoint.com"}
 
     Returns a flat list of endpoint dicts:
         {
@@ -186,7 +213,20 @@ def parse_collection(file_path: str | Path) -> list[dict]:
             "Only Collection v2.0 / v2.1 are supported."
         )
 
+    # Merge collection-level variables with caller-supplied ones (caller wins)
+    collection_vars: dict[str, str] = {}
+    for v in collection.get("variable", []):
+        if "key" in v:
+            collection_vars[v["key"]] = str(v.get("value", ""))
+    if variables:
+        collection_vars.update(variables)
+
     collection_auth = _extract_auth(collection.get("auth")) if collection.get("auth") else None
     items = collection.get("item", [])
-    endpoints = _walk_items(items, folder_path="", collection_auth=collection_auth)
+    endpoints = _walk_items(
+        items,
+        folder_path="",
+        collection_auth=collection_auth,
+        variables=collection_vars or None,
+    )
     return endpoints

@@ -5,6 +5,7 @@ Sheets produced
 ---------------
 1. Summary   — aggregate counts + duration, one row per endpoint
 2. Details   — one row per test case variant with full request/response data
+3. Latency   — latency breakdown (TTFB / body / total) per test case
 """
 
 from __future__ import annotations
@@ -120,6 +121,8 @@ def _build_summary(wb: Workbook, results: list[dict], run_meta: dict) -> None:
     headers = [
         "Endpoint Name", "Folder", "Method", "URL",
         "Total Variants", "Passed", "Failed", "Warned",
+        "Avg TTFB (ms)", "Avg Body (ms)", "Avg Total (ms)",
+        "Min Total (ms)", "Max Total (ms)",
     ]
     header_row = 13
     for c, h in enumerate(headers, start=1):
@@ -136,6 +139,7 @@ def _build_summary(wb: Workbook, results: list[dict], run_meta: dict) -> None:
                 "method": res.get("method", ""),
                 "url": res.get("url", ""),
                 "total": 0, "passed": 0, "failed": 0, "warned": 0,
+                "ttfb_list": [], "body_list": [], "total_list": [],
             }
         s = endpoint_stats[key]
         s["total"] += 1
@@ -146,6 +150,19 @@ def _build_summary(wb: Workbook, results: list[dict], run_meta: dict) -> None:
             s["warned"] += 1
         else:
             s["failed"] += 1
+        if not res.get("error"):
+            s["ttfb_list"].append(res.get("request_time_ms", 0.0))
+            s["body_list"].append(res.get("response_time_ms", 0.0))
+            s["total_list"].append(res.get("total_time_ms", 0.0))
+
+    def _avg(lst: list) -> str:
+        return f"{sum(lst)/len(lst):.1f}" if lst else "—"
+
+    def _min(lst: list) -> str:
+        return f"{min(lst):.1f}" if lst else "—"
+
+    def _max(lst: list) -> str:
+        return f"{max(lst):.1f}" if lst else "—"
 
     for i, (ep_name, s) in enumerate(endpoint_stats.items()):
         r = header_row + 1 + i
@@ -153,6 +170,8 @@ def _build_summary(wb: Workbook, results: list[dict], run_meta: dict) -> None:
         row_data = [
             ep_name, s["folder"], s["method"], s["url"],
             s["total"], s["passed"], s["failed"], s["warned"],
+            _avg(s["ttfb_list"]), _avg(s["body_list"]), _avg(s["total_list"]),
+            _min(s["total_list"]), _max(s["total_list"]),
         ]
         for c, val in enumerate(row_data, start=1):
             cell = ws.cell(row=r, column=c, value=val)
@@ -169,7 +188,7 @@ def _build_summary(wb: Workbook, results: list[dict], run_meta: dict) -> None:
                 c.fill = _fill(bg)
                 c.font = _font(bold=True, colour=fg)
 
-    _set_col_widths(ws, [30, 20, 10, 45, 14, 10, 10, 10])
+    _set_col_widths(ws, [30, 20, 10, 45, 14, 10, 10, 10, 15, 15, 15, 14, 14])
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +204,9 @@ DETAIL_HEADERS = [
     "Variant Description",
     "Expected Status",
     "Actual Status",
-    "Response Time (ms)",
+    "Request Time / TTFB (ms)",   # time from send → headers received
+    "Response Body Time (ms)",    # time to download body after headers
+    "Total Time (ms)",            # TTFB + body download
     "LLM Verdict",
     "LLM Analysis",
     "Request Headers",
@@ -194,7 +215,7 @@ DETAIL_HEADERS = [
     "Error",
 ]
 
-DETAIL_COL_WIDTHS = [28, 18, 10, 42, 22, 38, 15, 13, 18, 13, 55, 35, 35, 55, 30]
+DETAIL_COL_WIDTHS = [28, 18, 10, 42, 22, 38, 15, 13, 22, 22, 16, 13, 55, 35, 35, 55, 30]
 
 
 def _build_details(wb: Workbook, results: list[dict]) -> None:
@@ -219,6 +240,10 @@ def _build_details(wb: Workbook, results: list[dict]) -> None:
 
         req_headers_str = _json.dumps(res.get("request_headers", {}), indent=None)
 
+        ttfb    = res.get("request_time_ms", "")
+        body_dl = res.get("response_time_ms", "")
+        total   = res.get("total_time_ms", "")
+
         row_values = [
             res.get("endpoint_name", ""),
             res.get("folder_path", ""),
@@ -228,7 +253,9 @@ def _build_details(wb: Workbook, results: list[dict]) -> None:
             res.get("variant_description", ""),
             res.get("expected_status", ""),
             res.get("status_code", ""),
-            res.get("response_time_ms", ""),
+            ttfb,
+            body_dl,
+            total,
             verdict,
             reason,
             req_headers_str,
@@ -244,15 +271,25 @@ def _build_details(wb: Workbook, results: list[dict]) -> None:
             cell.border = THIN_BORDER
             cell.alignment = Alignment(vertical="top", wrap_text=False)
 
-        # Colour the verdict cell (column 10)
-        verdict_cell = ws.cell(row=r, column=10)
+        # Colour latency cells by threshold: >2000ms = red, >1000ms = yellow
+        for lat_col, lat_val in ((9, ttfb), (10, body_dl), (11, total)):
+            if isinstance(lat_val, (int, float)) and lat_val > 0:
+                if lat_val > 2000:
+                    ws.cell(row=r, column=lat_col).fill = _fill(COLOUR["fail_bg"])
+                    ws.cell(row=r, column=lat_col).font = _font(bold=True, colour=COLOUR["fail_fg"])
+                elif lat_val > 1000:
+                    ws.cell(row=r, column=lat_col).fill = _fill(COLOUR["warn_bg"])
+                    ws.cell(row=r, column=lat_col).font = _font(bold=True, colour=COLOUR["warn_fg"])
+
+        # Colour the verdict cell (column 12)
+        verdict_cell = ws.cell(row=r, column=12)
         if verdict:
             bg, fg = _verdict_style(verdict)
             verdict_cell.fill = _fill(bg)
             verdict_cell.font = _font(bold=True, colour=fg)
 
         # Wrap text for body/analysis columns
-        for wrap_col in (11, 12, 13, 14, 15):
+        for wrap_col in (13, 14, 15, 16, 17):
             ws.cell(row=r, column=wrap_col).alignment = Alignment(
                 vertical="top", wrap_text=True
             )
@@ -261,10 +298,106 @@ def _build_details(wb: Workbook, results: list[dict]) -> None:
 
     _set_col_widths(ws, DETAIL_COL_WIDTHS)
 
-    # Auto-filter on header row
-    ws.auto_filter.ref = (
-        f"A1:{get_column_letter(len(DETAIL_HEADERS))}1"
-    )
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(DETAIL_HEADERS))}1"
+
+
+# ---------------------------------------------------------------------------
+# Latency sheet
+# ---------------------------------------------------------------------------
+
+LATENCY_HEADERS = [
+    "Endpoint Name",
+    "Method",
+    "Test Variant",
+    "Request Time / TTFB (ms)",
+    "Response Body Time (ms)",
+    "Total Time (ms)",
+    "Status Code",
+    "LLM Verdict",
+    "Slow?",
+]
+LATENCY_COL_WIDTHS = [32, 10, 26, 24, 24, 18, 13, 13, 10]
+
+# Thresholds for "Slow" flag
+WARN_MS  = 1000
+FAIL_MS  = 2000
+
+
+def _build_latency(wb: Workbook, results: list[dict]) -> None:
+    ws = wb.create_sheet("Latency")
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A2"
+
+    for c, h in enumerate(LATENCY_HEADERS, start=1):
+        _header_cell(ws, 1, c, h)
+    ws.row_dimensions[1].height = 22
+
+    for i, res in enumerate(results):
+        r = i + 2
+        row_fill = _fill(COLOUR["alt_row"]) if i % 2 == 0 else _fill("FFFFFF")
+
+        ttfb    = res.get("request_time_ms", 0.0)
+        body_dl = res.get("response_time_ms", 0.0)
+        total   = res.get("total_time_ms", 0.0)
+        verdict = (res.get("analysis") or {}).get("verdict", "")
+
+        if res.get("error"):
+            slow_flag = "ERROR"
+        elif isinstance(total, (int, float)) and total > FAIL_MS:
+            slow_flag = "SLOW"
+        elif isinstance(total, (int, float)) and total > WARN_MS:
+            slow_flag = "WARN"
+        else:
+            slow_flag = ""
+
+        row_values = [
+            res.get("endpoint_name", ""),
+            res.get("method", ""),
+            res.get("variant_name", ""),
+            ttfb,
+            body_dl,
+            total,
+            res.get("status_code", ""),
+            verdict,
+            slow_flag,
+        ]
+
+        for c, val in enumerate(row_values, start=1):
+            cell = ws.cell(row=r, column=c, value=val)
+            cell.font = _font()
+            cell.fill = row_fill
+            cell.border = THIN_BORDER
+            cell.alignment = Alignment(vertical="center")
+
+        # Colour latency value cells
+        for lat_col, lat_val in ((4, ttfb), (5, body_dl), (6, total)):
+            if isinstance(lat_val, (int, float)) and lat_val > 0:
+                if lat_val > FAIL_MS:
+                    ws.cell(row=r, column=lat_col).fill = _fill(COLOUR["fail_bg"])
+                    ws.cell(row=r, column=lat_col).font = _font(bold=True, colour=COLOUR["fail_fg"])
+                elif lat_val > WARN_MS:
+                    ws.cell(row=r, column=lat_col).fill = _fill(COLOUR["warn_bg"])
+                    ws.cell(row=r, column=lat_col).font = _font(bold=True, colour=COLOUR["warn_fg"])
+
+        # Colour verdict cell (col 8)
+        if verdict:
+            bg, fg = _verdict_style(verdict)
+            ws.cell(row=r, column=8).fill = _fill(bg)
+            ws.cell(row=r, column=8).font = _font(bold=True, colour=fg)
+
+        # Colour slow flag cell (col 9)
+        if slow_flag == "SLOW":
+            ws.cell(row=r, column=9).fill = _fill(COLOUR["fail_bg"])
+            ws.cell(row=r, column=9).font = _font(bold=True, colour=COLOUR["fail_fg"])
+        elif slow_flag == "WARN":
+            ws.cell(row=r, column=9).fill = _fill(COLOUR["warn_bg"])
+            ws.cell(row=r, column=9).font = _font(bold=True, colour=COLOUR["warn_fg"])
+        elif slow_flag == "ERROR":
+            ws.cell(row=r, column=9).fill = _fill(COLOUR["fail_bg"])
+            ws.cell(row=r, column=9).font = _font(bold=True, colour=COLOUR["fail_fg"])
+
+    _set_col_widths(ws, LATENCY_COL_WIDTHS)
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(LATENCY_HEADERS))}1"
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +473,7 @@ def write_report(
 
     _build_summary(wb, results, run_meta)
     _build_details(wb, results)
+    _build_latency(wb, results)
 
     wb.save(out)
     return out.resolve()

@@ -101,6 +101,17 @@ Examples
         default="mistral",
         help="Ollama model name to use (default: mistral).",
     )
+    p.add_argument(
+        "--var",
+        action="append",
+        metavar="NAME=VALUE",
+        default=[],
+        help=(
+            "Override a Postman collection variable. "
+            "Repeat for multiple variables. "
+            "Example: --var local_url=https://qa.xcelviewpoint.com"
+        ),
+    )
     return p
 
 
@@ -155,9 +166,21 @@ def main() -> int:
     # ------------------------------------------------------------------
     # Step 1: Parse Postman collection
     # ------------------------------------------------------------------
+    # Parse --var NAME=VALUE pairs into a dict
+    cli_vars: dict[str, str] = {}
+    for entry in args.var:
+        if "=" in entry:
+            k, _, v = entry.partition("=")
+            cli_vars[k.strip()] = v.strip()
+        else:
+            print(f"  WARNING: Ignoring malformed --var '{entry}' (expected NAME=VALUE)")
+
+    if cli_vars:
+        print(f"  Variables: { {k: v for k, v in cli_vars.items()} }")
+
     print("Step 1/4  Parsing Postman collection …")
     try:
-        endpoints = parse_collection(args.collection)
+        endpoints = parse_collection(args.collection, variables=cli_vars or None)
     except FileNotFoundError as exc:
         print(f"\nERROR: {exc}", file=sys.stderr)
         return 1

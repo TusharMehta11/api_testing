@@ -130,13 +130,16 @@ def run_test_case(
         "request_headers": headers,
         "request_body": body or "",
         "status_code": None,
-        "response_time_ms": 0.0,
+        # Latency breakdown
+        "request_time_ms": 0.0,    # wall-clock time from send → headers received (TTFB)
+        "response_time_ms": 0.0,   # time to download response body after headers
+        "total_time_ms": 0.0,      # request_time_ms + response_time_ms
         "response_headers": {},
         "response_body": "",
         "error": None,
     }
 
-    start = time.perf_counter()
+    wall_start = time.perf_counter()
     try:
         resp = requests.request(
             method=method,
@@ -146,26 +149,38 @@ def run_test_case(
             auth=auth,
             timeout=timeout,
             allow_redirects=True,
+            stream=True,          # stream=True lets us time body read separately
         )
-        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        # TTFB: requests.elapsed = server processing + network to first response byte
+        ttfb_ms = round(resp.elapsed.total_seconds() * 1000, 2)
+
+        # Body download: read content and measure wall time
+        body_start = time.perf_counter()
+        try:
+            raw_content = resp.content          # download full body
+            body_ms = round((time.perf_counter() - body_start) * 1000, 2)
+            response_body = raw_content.decode(resp.encoding or "utf-8", errors="replace")
+        except Exception:
+            body_ms = round((time.perf_counter() - body_start) * 1000, 2)
+            response_body = "<binary or undecodable response>"
 
         result["status_code"] = resp.status_code
-        result["response_time_ms"] = round(elapsed_ms, 2)
+        result["request_time_ms"] = ttfb_ms
+        result["response_time_ms"] = body_ms
+        result["total_time_ms"] = round(ttfb_ms + body_ms, 2)
         result["response_headers"] = dict(resp.headers)
-        try:
-            result["response_body"] = resp.text
-        except Exception:
-            result["response_body"] = "<binary or undecodable response>"
+        result["response_body"] = response_body
 
     except requests.exceptions.ConnectionError as exc:
         result["error"] = f"Connection error: {exc}"
-        result["response_time_ms"] = round((time.perf_counter() - start) * 1000, 2)
+        result["total_time_ms"] = round((time.perf_counter() - wall_start) * 1000, 2)
     except requests.exceptions.Timeout:
         result["error"] = f"Request timed out after {timeout}s"
-        result["response_time_ms"] = round((time.perf_counter() - start) * 1000, 2)
+        result["total_time_ms"] = round((time.perf_counter() - wall_start) * 1000, 2)
     except requests.exceptions.RequestException as exc:
         result["error"] = str(exc)
-        result["response_time_ms"] = round((time.perf_counter() - start) * 1000, 2)
+        result["total_time_ms"] = round((time.perf_counter() - wall_start) * 1000, 2)
 
     return result
 

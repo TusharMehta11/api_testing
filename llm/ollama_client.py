@@ -15,7 +15,7 @@ import requests
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 MODEL = "mistral"
-REQUEST_TIMEOUT = 120  # seconds
+REQUEST_TIMEOUT = 480  # seconds
 
 
 # ---------------------------------------------------------------------------
